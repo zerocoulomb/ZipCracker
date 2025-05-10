@@ -1,10 +1,12 @@
 import zipfile
+
+import pyzipper
 import tqdm
 import sys
 from colorama import Fore, init
 import os
 import logging
-import signal
+from dataclasses import dataclass
 
 init(autoreset=True)
 
@@ -15,7 +17,13 @@ logging.basicConfig(
     )
 
 
-class ZipCracker():
+@dataclass
+class CrackResult:
+    cracked: bool
+    password: str | None
+
+
+class ZipCracker:
     """Cracks zip files
     """
 
@@ -25,46 +33,71 @@ class ZipCracker():
         Arguments:
             zip_path (str) path of zip file
         """
-        signal.signal(signal.SIGINT, self._handler)
 
-        self._password = None
+        self._crack_result = CrackResult(False, None)
 
-        if not os.path.exists(zip_path):
-            logging.error(Fore.RED+"Please enter exist zip file")
-            return
+        self._zip_file = None
 
-        self.zip_file = zipfile.ZipFile(zip_path)
+        try:
 
-    def crack(self, pass_path: str) -> None:
+            self._zip_file = pyzipper.AESZipFile(zip_path)
+
+        except (zipfile.BadZipFile, FileNotFoundError):
+
+            logging.debug(Fore.RED+"Please enter exist zip file")
+
+    def crack(self, pass_path: str) -> CrackResult | None:
         """Cracks zip file
 
         Arguments:
             pass_path (str) password wordlist file path
         """
-        if not os.path.exists(pass_path):
-            logging.error(Fore.RED+"Please enter exists wordlist")
-            return
+        if self._zip_file is not None:
 
-        self._start_cracking(pass_path)
-        self._log_cracked()
+            if not os.path.isfile(pass_path):
+                logging.debug(Fore.RED+"Please enter exist wordlist")
+                sys.exit(1)
 
-    def _handler(self, signum, frame):
-        sys.exit(0)
+            logging.debug(Fore.BLUE + "Zip File: " + Fore.LIGHTWHITE_EX + os.path.abspath(self._zip_file.filename))
+            logging.debug(Fore.BLUE + "Wordlist: " + Fore.LIGHTWHITE_EX  + os.path.abspath(pass_path))
 
-    def _start_cracking(self, pass_path: str) -> None:
-        """Starts cracking process
+            if self._start_cracking(pass_path):
+                self._log_result()
+
+        return self._crack_result
+
+    def _start_cracking(self, pass_path: str) -> bool:
+        """Starts cracking pocess
 
         Arguments:
             pass_path (str) password wordlist file path
         """
+        print()
 
-        bar = self._create_bar(pass_path)
+        try:
+            with self._create_bar(pass_path) as bar:
 
-        for password in bar:
-            bar.set_postfix_str(password.decode(), refresh=False)
-            if self._try_password(password):
-                self._password = password.decode()
-                break
+                for password in bar:
+
+                    bar.set_postfix_str(password.decode(), refresh=False)
+
+                    self._crack_result = self._try_password(password)
+
+                    if self._crack_result.cracked:
+                        break
+
+        except KeyboardInterrupt:
+
+            logging.debug(Fore.RED + "Stopping")
+
+            return False
+
+        finally:
+
+            self._zip_file.close()
+
+        return True
+
 
     def _create_bar(self, pass_path: str) -> tqdm.tqdm:
         """Creates status bar
@@ -86,40 +119,27 @@ class ZipCracker():
             unit=" password",
             dynamic_ncols=True,
             mininterval=0.5,
-            colour="red"
+            colour="red",
+            leave=False,
             )
 
         return bar
 
-    @property
-    def cracked(self) -> bool:
-        """Checks zip cracked or not
-
-        Returns:
-            bool: cracked or not
-        """
-        return self.password is not None
-
-    @property
-    def password(self) -> str:
-        """Gets cracked password
-
-        Returns:
-            str: cracked password
-        """
-        return self._password
-
-    def _try_password(self, password: bytes) -> None:
+    def _try_password(self, password: bytes) -> CrackResult:
         """Tries password to match with zip file's password
 
         Arguments:
             password (bytes) password to try
         """
         try:
-            self.zip_file.extractall(pwd=password)
-        except Exception:
-            return False
-        return True
+            self._zip_file.setpassword(password)
+            self._zip_file.extractall()
+
+        except RuntimeError:
+
+            return CrackResult(False,password.decode())
+
+        return CrackResult(True,password.decode())
 
     def _get_size(self, pass_path: str) -> int:
         """Get count of passwords in wordlist
@@ -146,13 +166,14 @@ class ZipCracker():
             for password in pass_file:
                 yield password.strip()
 
-    def _log_cracked(self) -> None:
+    def _log_result(self) -> None:
         """Logs cracked status
         """
-        if self.cracked:
+        if self._crack_result.cracked:
+
             logging.debug(Fore.BLUE + "Status:" + Fore.GREEN + " cracked")
             logging.debug(
-                Fore.BLUE+"Password: "+Fore.GREEN + self.password
+                Fore.BLUE+"Password: "+Fore.GREEN + self._crack_result.password
             )
         else:
             logging.debug(Fore.BLUE+"Status:"+Fore.RED + " not cracked\n")
